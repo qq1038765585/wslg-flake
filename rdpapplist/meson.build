@@ -48,7 +48,7 @@ pkgconfig.generate(
     version: version_rdpapplist,
     name: 'Application list Plugin for FreeRDP',
     description: 'Header files for Application list Plugin for FreeRDP',
-    Libraries: plugin_rdpapplist_server,
+    libraries: plugin_rdpapplist_server,
 )
 
 install_headers(
@@ -56,4 +56,5 @@ install_headers(
     'rdpapplist_server.h',
     subdir: name_rdpapplist,
 )
+
 
