@@ -5,11 +5,10 @@
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
 
     wsland.url = "github:qq1038765585/wsland/working";
-    wslg-applist.url = "github:qq1038765585/wslg-flake/main";
     wslg-freerdp.url = "github:qq1038765585/freerdp-flake/working";
   };
 
-  outputs = { self, nixpkgs, wsland, wslg-applist, wslg-freerdp }:
+  outputs = { self, nixpkgs, wsland, wslg-freerdp }:
     let
       forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
     in {
@@ -18,7 +17,6 @@
 
         wsland-lib = wsland.packages.${system}.default;
         wslg-freerdp-lib = wslg-freerdp.packages.${system}.default;
-        wslg-applist-lib = wslg-applist.packages.${system}.wslg-applist;
       in {
           wslg-applist = pkgs.stdenv.mkDerivation {
           name = "wsl-applist";
@@ -52,7 +50,6 @@
 
         wsland-lib = wsland.packages.${system}.default;
         wslg-freerdp-lib = wslg-freerdp.packages.${system}.default;
-        wslg-applist-lib = wslg-applist.packages.${system}.wslg-applist;
       in {
           wslg-applist = pkgs.mkShell {
             packages = with pkgs; [
