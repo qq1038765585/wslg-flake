@@ -27,6 +27,10 @@
           buildInputs = with pkgs; [
             wslg-freerdp-lib
           ];
+
+          postInstall = ''
+            cp ${out}/lib/rdpapplist/librdpapplist-server.so ${out}/lib/
+          '';
         };
 
         default = pkgs.stdenv.mkDerivation {
