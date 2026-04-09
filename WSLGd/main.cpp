@@ -9,7 +9,7 @@
 #define MSRDC_EXE "msrdc.exe"
 #define MSTSC_EXE "mstsc.exe"
 #define GDBSERVER_PATH "/usr/bin/gdbserver"
-#define WESTON_NOTIFY_SOCKET SHARE_PATH "/weston-notify.sock"
+#define WSLAND_NOTIFY_SOCKET SHARE_PATH "/wsland-notify.sock"
 #define DEFAULT_ICON_PATH "/usr/share/icons"
 #define USER_DISTRO_ICON_PATH USER_DISTRO_MOUNT_PATH DEFAULT_ICON_PATH
 #define MAX_RESERVED_PORT 1024
@@ -25,6 +25,7 @@ constexpr auto c_shareDocsMount = SHARE_PATH "/doc";
 constexpr auto c_x11RuntimeDir = SHARE_PATH "/.X11-unix";
 constexpr auto c_xdgRuntimeDir = SHARE_PATH "/runtime-dir";
 constexpr auto c_stdErrLogFile = SHARE_PATH "/stderr.log";
+constexpr auto c_x11RuntimeTmpDir = "/tmp/.X11-unix";
 
 constexpr auto c_sharedMemoryMountPoint = "/mnt/shared_memory";
 constexpr auto c_sharedMemoryMountPointEnv = "WSL2_SHARED_MEMORY_MOUNT_POINT";
@@ -36,13 +37,7 @@ constexpr auto c_systemDistroEnvSection = "system-distro-env";
 
 constexpr auto c_windowsSystem32 = "/mnt/c/Windows/System32";
 
-constexpr auto c_westonShellDesktopEnv = "WSL2_WESTON_SHELL_DESKTOP";
-
-constexpr auto c_westonRdprailShell = "rdprail-shell";
-constexpr auto c_westonRdpdesktopShell = "desktop-shell";
-
 constexpr auto c_rdpRailFile = "wslg.rdp";
-constexpr auto c_rdpDesktopFile = "wslg_desktop.rdp";
 
 void LogPrint(int level, const char *func, int line, const char *fmt, ...) noexcept
 {
@@ -234,8 +229,8 @@ try {
         {"WAYLAND_DISPLAY", "wayland-0", false},
         {"DISPLAY", ":0", false},
         {"XCURSOR_PATH", USER_DISTRO_ICON_PATH ":" DEFAULT_ICON_PATH , false},
-        {"XCURSOR_THEME", "whiteglass", false},
-        {"XCURSOR_SIZE", "16", false},
+        {"XCURSOR_THEME", "capitaine-cursors", false},
+        {"XCURSOR_SIZE", "32", false},
         {"PULSE_SERVER", SHARE_PATH "/PulseServer", false},
         {"PULSE_AUDIO_RDP_SINK", SHARE_PATH "/PulseAudioRDPSink", false},
         {"PULSE_AUDIO_RDP_SOURCE", SHARE_PATH "/PulseAudioRDPSource", false},
@@ -304,10 +299,12 @@ try {
     // Make directories and ensure the correct permissions.
     std::filesystem::create_directories(c_dbusDir);
     THROW_LAST_ERROR_IF(chown(c_dbusDir, passwordEntry->pw_uid, passwordEntry->pw_gid) < 0);
-    THROW_LAST_ERROR_IF(chmod(c_dbusDir, 0777) < 0);
 
     std::filesystem::create_directories(c_x11RuntimeDir);
     THROW_LAST_ERROR_IF(chmod(c_x11RuntimeDir, 0777) < 0);
+
+    THROW_LAST_ERROR_IF(chown(c_x11RuntimeTmpDir, passwordEntry->pw_uid, passwordEntry->pw_gid) < 0);
+    THROW_LAST_ERROR_IF(chmod(c_x11RuntimeTmpDir, 1777) < 0);
 
     std::filesystem::create_directories(c_xdgRuntimeDir);
     THROW_LAST_ERROR_IF(chown(c_xdgRuntimeDir, passwordEntry->pw_uid, passwordEntry->pw_gid) < 0);
@@ -365,71 +362,42 @@ try {
     }
 
     // Construct socket option string.
-    std::string westonSocketOption("--socket=");
-    westonSocketOption += getenv("WAYLAND_DISPLAY");
-
-    // Check if weston shell override is specified.
-    // Otherwise, default shell is 'rdprail-shell'.
-    // Alternatively, it can be 'desktop-shell'.
-    bool isRdpDesktopShell = GetEnvBool(c_westonShellDesktopEnv, false);
-    std::string westonShellName;
-    if (isRdpDesktopShell)
-        westonShellName = c_westonRdpdesktopShell;
-    else
-        westonShellName = c_westonRdprailShell;
-
-    // Construct shell option string.
-    std::string westonShellOption("--shell=");
-    westonShellOption += westonShellName;
-    westonShellOption += ".so";
+    std::string wslandSocketOption("-s ");
+    wslandSocketOption += getenv("WAYLAND_DISPLAY");
 
     // Construct log file option string.
-    std::string westonLogFileOption("--log=");
-    auto westonLogFilePathEnv = getenv("WSLG_WESTON_LOG_PATH");
-    if (westonLogFilePathEnv) {
-        westonLogFileOption += westonLogFilePathEnv;
+    std::string wslandLogFileOption("-l ");
+    auto wslandLogFilePathEnv = getenv("WSLG_WSLAND_LOG_PATH");
+    if (wslandLogFilePathEnv) {
+        wslandLogFileOption += wslandLogFilePathEnv;
     } else {
-        westonLogFileOption += SHARE_PATH "/weston.log";
-    }
-
-    // Construct logger option string.
-    // By default, enable standard log and rdp-backend.
-    std::string westonLoggerOption("--logger-scopes=log,rdp-backend");
-    // If rdprail-shell is used, enable logger for that.
-    if (!isRdpDesktopShell) {
-        westonLoggerOption += ",";
-        westonLoggerOption += c_westonRdprailShell;
+        wslandLogFileOption += SHARE_PATH "/wsland.log";
     }
 
     // Setup notify for wslgd-notify.so
-    wil::unique_fd notifyFd(SetupReadyNotify(WESTON_NOTIFY_SOCKET));
+    wil::unique_fd notifyFd(SetupReadyNotify(WSLAND_NOTIFY_SOCKET));
     THROW_LAST_ERROR_IF(!notifyFd);
 
     // Construct weston option string.
-    std::string westonArgs;
-    char *gdbServerPort = getenv("WSLG_WESTON_GDBSERVER_PORT");
+    std::string wslandArgs;
+    char *gdbServerPort = getenv("WSLG_WSLAND_GDBSERVER_PORT");
     if ((access(GDBSERVER_PATH, X_OK) == 0) && IsNumeric(gdbServerPort)) {
-        westonArgs += GDBSERVER_PATH;
-        westonArgs += " :";
-        westonArgs += gdbServerPort;
-        westonArgs += " ";
+        wslandArgs += GDBSERVER_PATH;
+        wslandArgs += " :";
+        wslandArgs += gdbServerPort;
+        wslandArgs += " ";
     }
-    westonArgs += "/usr/bin/weston ";
-    westonArgs += "--backend=rdp-backend.so --modules=wslgd-notify.so --xwayland ";
-    westonArgs += westonSocketOption;
-    westonArgs += " ";
-    westonArgs += westonShellOption;
-    westonArgs += " ";
-    westonArgs += westonLogFileOption;
-    westonArgs += " ";
-    westonArgs += westonLoggerOption;
+    wslandArgs += "/usr/bin/wsland ";
+    wslandArgs += wslandSocketOption;
+    wslandArgs += " ";
+    wslandArgs += wslandLogFileOption;
 
     // Launch weston.
     // N.B. Additional capabilities are needed to setns to the mount namespace of the user distro.
     monitor.LaunchProcess(std::vector<std::string>{
                 "/usr/bin/sh",
                 "-c",
-                std::move(westonArgs)
+                std::move(wslandArgs)
             },
             std::vector<cap_value_t>{
                 CAP_SYS_ADMIN,
@@ -439,8 +407,8 @@ try {
             std::vector<std::string>{
                 std::move(socketEnvString),
                 std::move(serviceIdEnvString),
-                "WSLGD_NOTIFY_SOCKET=" WESTON_NOTIFY_SOCKET,
-                "WESTON_DISABLE_ABSTRACT_FD=1",
+                "WSLGD_NOTIFY_SOCKET=" WSLAND_NOTIFY_SOCKET,
+                "WSLAND_DISABLE_ABSTRACT_FD=1",
                 getenv("WLOG_APPENDER") ? : "", "WLOG_APPENDER=file",
                 getenv("WLOG_FILEAPPENDER_OUTPUT_FILE_NAME") ? "" : "WLOG_FILEAPPENDER_OUTPUT_FILE_NAME=wlog.log",
                 getenv("WLOG_FILEAPPENDER_OUTPUT_FILE_PATH") ? "" : "WLOG_FILEAPPENDER_OUTPUT_FILE_PATH=" SHARE_PATH
@@ -449,7 +417,7 @@ try {
 
     // Wait weston to be ready before starting RDP client, pulseaudio server.
     WaitForReadyNotify(notifyFd.get());
-    unlink(WESTON_NOTIFY_SOCKET);
+    unlink(WSLAND_NOTIFY_SOCKET);
 
     // Start font monitoring if user distro's X11 fonts to be shared with system distro.
     if (GetEnvBool("WSLG_USE_USER_DISTRO_XFONTS", true))
@@ -490,10 +458,7 @@ try {
 
     std::string rdpFilePathArg(wslInstallPath);
     rdpFilePathArg += "\\"; // Windows-style path
-    if (isRdpDesktopShell) 
-        rdpFilePathArg += c_rdpDesktopFile;
-    else 
-        rdpFilePathArg += c_rdpRailFile;
+    rdpFilePathArg += c_rdpRailFile;
 
     monitor.LaunchProcess(std::vector<std::string>{
         "/init",

@@ -28,5 +28,4 @@ plugin_rdpapplist_server = shared_library(
     dependencies: deps_librdpapplist_server,
     name_prefix: '',
     install: true,
-    install_dir: install_lib_dir_rdpapplist,
 )

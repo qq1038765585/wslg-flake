@@ -1,0 +1,252 @@
+# Create a builder image with the compilers, etc. needed
+FROM archlinux:base-devel AS build-env
+RUN echo 'Server = https://mirrors.ustc.edu.cn/archlinux/$repo/os/$arch' > /etc/pacman.d/mirrorlist
+
+# Install all the required packages for building. This list is probably
+# longer than necessary.
+RUN echo "== Install Git/CA certificates ==" && \
+    pacman -Sy --noconfirm \
+        git \
+        mesa \
+        directx-headers
+
+#RUN echo "== Install all dependencies ==" && \
+    pacman -S --noconfirm \
+        meson \
+        libsndfile \
+        libice \
+        libsm \
+        libxtst \
+        perl-xml-parser \
+        cmake \
+        clang \
+        wlroots0.20 \
+        xorg-xwayland
+
+# Create an image with builds of FreeRDP and Weston
+FROM build-env AS dev
+
+ARG WSLG_VERSION="<current>"
+ARG WSLG_ARCH="x86_64"
+ARG SYSTEMDISTRO_DEBUG_BUILD
+ARG FREERDP_VERSION=2
+
+WORKDIR /work
+RUN echo "WSLg (" ${WSLG_ARCH} "):" ${WSLG_VERSION} > /work/versions.txt
+RUN echo "Built at:" `date --utc` >> /work/versions.txt
+
+RUN echo "Arch Linux:" `cat /etc/os-release | head -2 | tail -1` >> /work/versions.txt
+
+#
+# Build runtime dependencies.
+#
+
+ENV BUILDTYPE=${SYSTEMDISTRO_DEBUG_BUILD:+debug}
+ENV BUILDTYPE=${BUILDTYPE:-release}
+RUN echo "== System distro build type:" ${BUILDTYPE} " =="
+
+ENV BUILDTYPE_NODEBUGSTRIP=${SYSTEMDISTRO_DEBUG_BUILD:+debug}
+ENV BUILDTYPE_NODEBUGSTRIP=${BUILDTYPE_NODEBUGSTRIP:-release}
+RUN echo "== System distro build type (no debug strip):" ${BUILDTYPE_NODEBUGSTRIP} " =="
+
+# FreeRDP is always built with RelWithDebInfo
+ARG BUILDTYPE_FREERDP
+ENV BUILDTYPE_FREERDP=${BUILDTYPE_FREERDP:-RelWithDebInfo}
+RUN echo "== System distro build type (FreeRDP):" ${BUILDTYPE_FREERDP} " =="
+
+ENV WITH_DEBUG_FREERDP=${SYSTEMDISTRO_DEBUG_BUILD:+ON}
+ENV WITH_DEBUG_FREERDP=${WITH_DEBUG_FREERDP:-OFF}
+RUN echo "== System distro build type (FreeRDP Debug Options):" ${WITH_DEBUG_FREERDP} " =="
+
+ENV DESTDIR=/work/build
+ENV PREFIX=/usr
+ENV PKG_CONFIG_PATH=${DESTDIR}${PREFIX}/lib/pkgconfig:${DESTDIR}${PREFIX}/lib/${WSLG_ARCH}-linux-gnu/pkgconfig:${DESTDIR}${PREFIX}/share/pkgconfig
+ENV C_INCLUDE_PATH=${DESTDIR}${PREFIX}/include/freerdp${FREERDP_VERSION}:${DESTDIR}${PREFIX}/include/winpr${FREERDP_VERSION}:${DESTDIR}${PREFIX}/include/wsl/stubs:${DESTDIR}${PREFIX}/include
+ENV CPLUS_INCLUDE_PATH=${C_INCLUDE_PATH}
+ENV LIBRARY_PATH=${DESTDIR}${PREFIX}/lib
+ENV LD_LIBRARY_PATH=${LIBRARY_PATH}
+ENV CC=/usr/bin/gcc
+ENV CXX=/usr/bin/g++
+
+# Setup DebugInfo folder
+COPY debuginfo /work/debuginfo
+RUN chmod +x /work/debuginfo/gen_debuginfo.sh
+
+# Build mesa with the minimal options we need.
+COPY vendor/mesa /work/vendor/mesa
+
+# Build PulseAudio
+COPY vendor/pulseaudio /work/vendor/pulseaudio
+WORKDIR /work/vendor/pulseaudio
+RUN /usr/bin/meson --prefix=${PREFIX} build \
+        --buildtype=${BUILDTYPE_NODEBUGSTRIP} \
+        -Ddatabase=simple \
+        -Ddoxygen=false \
+        -Dgsettings=disabled \
+        -Dtests=false && \
+    ninja -C build -j8 install && \
+    echo 'pulseaudio:' `git --git-dir=/work/vendor/pulseaudio/.git rev-parse --verify HEAD` >> /work/versions.txt
+
+# Build FreeRDP
+COPY vendor/freerdp /work/vendor/freerdp
+WORKDIR /work/vendor/freerdp
+RUN cmake -G Ninja \
+        -B build \
+        -DCMAKE_INSTALL_PREFIX=${PREFIX} \
+        -DCMAKE_INSTALL_LIBDIR=${PREFIX}/lib \
+        -DCMAKE_BUILD_TYPE=${BUILDTYPE_FREERDP} \
+        -DWITH_DEBUG_ALL=${WITH_DEBUG_FREERDP} \
+        -DWITH_ICU=ON \
+        -DWITH_SERVER=ON \
+        -DWITH_CHANNEL_GFXREDIR=ON \
+        -DWITH_CHANNEL_RDPAPPLIST=ON \
+        -DWITH_CLIENT=OFF \
+        -DWITH_CLIENT_COMMON=OFF \
+        -DWITH_CLIENT_CHANNELS=OFF \
+        -DWITH_CLIENT_INTERFACE=OFF \
+        -DWITH_LIBSYSTEMD=OFF \
+        -DWITH_WAYLAND=OFF \
+        -DWITH_X11=OFF \
+        -DWITH_PROXY=OFF \
+        -DWITH_SHADOW=OFF \
+        -DWITH_SAMPLE=OFF \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && \
+    ninja -C build -j8 install && \
+    echo 'freerdp:' `git --git-dir=/work/vendor/freerdp/.git rev-parse --verify HEAD` >> /work/versions.txt
+
+WORKDIR /work/debuginfo
+RUN if [ -z "$SYSTEMDISTRO_DEBUG_BUILD" ] ; then \
+        echo "== Strip debug info: freerdp ==" && \
+        /work/debuginfo/gen_debuginfo.sh /work/debuginfo/FreeRDP${FREERDP_VERSION}.list /work/build; \
+    fi
+
+# Build rdpapplist RDP virtual channel plugin
+COPY rdpapplist /work/rdpapplist
+WORKDIR /work/rdpapplist
+RUN /usr/bin/meson --prefix=${PREFIX} build \
+        --buildtype=${BUILDTYPE} && \
+    ninja -C build -j8 install
+
+WORKDIR /work/debuginfo
+RUN if [ -z "$SYSTEMDISTRO_DEBUG_BUILD" ] ; then \
+        echo "== Strip debug info: rdpapplist ==" && \
+        /work/debuginfo/gen_debuginfo.sh /work/debuginfo/rdpapplist.list /work/build; \
+    fi
+
+# Build Weston
+COPY vendor/wsland /work/vendor/wsland
+WORKDIR /work/vendor/wsland
+RUN /usr/bin/meson --prefix=${PREFIX} build \
+        --buildtype=${BUILDTYPE} && \
+    ninja -C build -j8 install && \
+    echo 'wsland:' `git --git-dir=/work/vendor/wsland/.git rev-parse --verify HEAD` >> /work/versions.txt
+
+WORKDIR /work/debuginfo
+RUN if [ -z "$SYSTEMDISTRO_DEBUG_BUILD" ] ; then \
+        echo "== Strip debug info: wsland ==" && \
+        /work/debuginfo/gen_debuginfo.sh /work/debuginfo/wsland.list /work/build; \
+    fi
+
+# Build WSLGd Daemon
+ENV CC=/usr/bin/clang
+ENV CXX=/usr/bin/clang++
+
+COPY WSLGd /work/WSLGd
+WORKDIR /work/WSLGd
+RUN /usr/bin/meson --prefix=${PREFIX} build \
+        --buildtype=${BUILDTYPE} && \
+    ninja -C build -j8 install
+
+WORKDIR /work/debuginfo
+RUN if [ -z "$SYSTEMDISTRO_DEBUG_BUILD" ] ; then \
+        echo "== Strip debug info: WSLGd ==" && \
+        /work/debuginfo/gen_debuginfo.sh /work/debuginfo/WSLGd.list /work/build; \
+    fi
+
+# Gather debuginfo to a tar file
+WORKDIR /work/debuginfo
+RUN if [ -z "$SYSTEMDISTRO_DEBUG_BUILD" ] ; then \
+        echo "== Compress debug info: /work/debuginfo/system-debuginfo.tar.gz ==" && \
+        tar -C /work/build/debuginfo -czf system-debuginfo.tar.gz ./ ; \
+    fi
+
+########################################################################
+########################################################################
+
+## Create the distro image with just what's needed at runtime
+
+FROM archlinux:base AS runtime
+RUN echo 'Server = https://mirrors.ustc.edu.cn/archlinux/$repo/os/$arch' > /etc/pacman.d/mirrorlist
+
+#RUN echo "== Install Core/UI Runtime Dependencies ==" && \
+    pacman -Sy --noconfirm \
+    mesa \
+    directx-headers \
+    wlroots0.20 \
+    xorg-xwayland \
+    busybox \
+    nftables \
+    libsndfile \
+    libxcursor \
+    libinput \
+    libltdl \
+    librsvg \
+    chrony \
+    xcursor-themes \
+    xcb-util-cursor \
+    capitaine-cursors \
+    sudo \
+    dhcpcd
+
+# Remove unnecessary packages and files to reduce image size
+ARG SYSTEMDISTRO_DEBUG_BUILD
+RUN if [ -z "$SYSTEMDISTRO_DEBUG_BUILD" ] ; then \
+        echo "== Removing unnecessary packages =="; \
+    else \
+        echo "== Install development aid packages ==" && \
+        pacman -S --noconfirm \
+             gdb \
+             vim; \
+    fi
+
+# Clear the tdnf cache to make the image smaller
+RUN /sbin/busybox --install -s
+RUN pacman -Scc --noconfirm
+
+# Create wslg user.
+RUN useradd -u 1000 --create-home wslg && \
+    mkdir /home/wslg/.config && \
+    chown wslg /home/wslg/.config
+
+# Copy config files.
+COPY config/wsl.conf /etc/wsl.conf
+COPY config/local.conf /etc/fonts/local.conf
+
+# Copy default icon file.
+COPY resources/linux.png /usr/share/icons/wsl/linux.png
+
+# Copy the built artifacts from the build stage.
+COPY --from=dev /work/build/usr/ /usr/
+COPY --from=dev /work/build/etc/ /etc/
+
+# Append WSLg setttings to pulseaudio.
+COPY config/default_wslg.pa /etc/pulse/default_wslg.pa
+RUN cat /etc/pulse/default_wslg.pa >> /etc/pulse/default.pa
+RUN rm /etc/pulse/default_wslg.pa
+
+# Copy the licensing information for PulseAudio
+COPY --from=dev /work/vendor/pulseaudio/GPL \
+                /work/vendor/pulseaudio/LGPL \
+                /work/vendor/pulseaudio/LICENSE \
+                /work/vendor/pulseaudio/NEWS \
+                /work/vendor/pulseaudio/README /usr/share/doc/pulseaudio/
+
+# Copy the licensing information for FreeRDP
+COPY --from=dev /work/vendor/freerdp/LICENSE /usr/share/doc/FreeRDP/LICENSE
+
+# copy the documentation and licensing information for mesa
+COPY --from=dev /work/vendor/mesa/docs /usr/share/doc/mesa/
+
+COPY --from=dev /work/versions.txt /etc/versions.txt
+
+CMD /usr/bin/WSLGd
